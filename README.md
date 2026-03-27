@@ -23,10 +23,10 @@ Every 10 minutes the bot checks for new challenges across your active competitio
 
 ```
 ┌─────────────────┐
-│ New Challenge    │
-│                  │
-│ challenge_name   │
-│ (Category)       │
+│ New Challenge   │
+│                 │
+│ challenge_name  │
+│ (Category)      │
 └─────────────────┘
 ```
 
