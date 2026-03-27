@@ -1,10 +1,10 @@
 # Hackcenter Tracker
 
-A Discord bot that tracks 
+A Discord bot that tracks challenges and users in Hackcenter.
 
 ## Features
 
-- **User Tracking**: Track Hackcenter users by their User ID via DM
+- **User Tracking**: Track Hackcenter users by their username via DM
 - **Challenges**: Notifies users when new challenges are available
 - **Leaderboard**: Shows the top 10 users by points
 
@@ -12,7 +12,7 @@ A Discord bot that tracks
 
 | Command | Description |
 |---------|-------------|
-| `!track` | Start tracking your Hackcenter via DM |
+| `!track` | Start tracking your Hackcenter username via DM |
 | `!untrack` | Stop tracking your Hackcenter account |
 | `!stats` | View your personal progress |
 | `!top` | View the leaderboard |
