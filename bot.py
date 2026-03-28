@@ -22,20 +22,30 @@ logging.basicConfig(
 log = logging.getLogger("tracker")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID_STR = os.getenv("CHANNEL_ID")
+CHANNEL_IDS_RAW = (os.getenv("CHANNEL_IDS") or os.getenv("CHANNEL_ID") or "").strip()
 HC_API_URL = os.getenv("HC_API_URL")
 SITE_EMAIL = os.getenv("SITE_EMAIL", "").strip()
 SITE_PASSWORD = os.getenv("SITE_PASSWORD", "").strip()
 
-if not DISCORD_TOKEN or not HC_API_URL or not CHANNEL_ID_STR:
+if not DISCORD_TOKEN or not HC_API_URL or not CHANNEL_IDS_RAW:
     log.error("Missing keys in .env file!")
     exit()
 
-try:
-    CHANNEL_ID = int(CHANNEL_ID_STR)
-except ValueError:
-    log.error("CHANNEL_ID in .env must be a number.")
+ALLOWED_CHANNEL_IDS = []
+for part in CHANNEL_IDS_RAW.replace(" ", "").split(","):
+    if not part:
+        continue
+    try:
+        ALLOWED_CHANNEL_IDS.append(int(part))
+    except ValueError:
+        log.error("CHANNEL_IDS must be comma-separated integers (e.g. 123,456).")
+        exit()
+
+if not ALLOWED_CHANNEL_IDS:
+    log.error("CHANNEL_IDS must list at least one channel id.")
     exit()
+
+ALLOWED_CHANNEL_IDS = frozenset(ALLOWED_CHANNEL_IDS)
 
 TOP_PER_PAGE = 10
 HTTP = requests.Session()
@@ -222,6 +232,30 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+def channel_allowed_for_guild(
+    channel: discord.abc.GuildChannel | discord.Thread | None,
+) -> bool:
+    if channel is None:
+        return False
+    if channel.id in ALLOWED_CHANNEL_IDS:
+        return True
+    if isinstance(channel, discord.Thread) and channel.parent_id is not None:
+        return channel.parent_id in ALLOWED_CHANNEL_IDS
+    return False
+
+
+async def guild_channel_check(ctx: commands.Context) -> bool:
+    if ctx.guild is None:
+        return True
+    if channel_allowed_for_guild(ctx.channel):
+        return True
+    await ctx.send("⚠️ Use this bot only in the designated channel(s).")
+    return False
+
+
+bot.add_check(guild_channel_check)
+
+
 @bot.event
 async def on_ready():
     log.info(f"Bot connected as {bot.user} (ID: {bot.user.id})")
@@ -248,9 +282,14 @@ async def check_new_challenges():
     if CURRENT_USER_ID is None:
         return
 
-    channel = bot.get_channel(CHANNEL_ID)
-    if channel is None:
-        log.warning(f"Channel {CHANNEL_ID} not found")
+    channels = []
+    for cid in ALLOWED_CHANNEL_IDS:
+        ch = bot.get_channel(cid)
+        if ch is None:
+            log.warning(f"Channel {cid} not found (new challenge notify skipped for it)")
+        else:
+            channels.append(ch)
+    if not channels:
         return
 
     try:
@@ -305,7 +344,8 @@ async def check_new_challenges():
                     embed.description = f"**{name}** ({category})"
                 else:
                     embed.description = f"**{name}**"
-                await channel.send(embed=embed)
+                for ch in channels:
+                    await ch.send(embed=embed)
 
         if new_count > 0:
             log.info(f"Found {new_count} new challenge(s) in competition {cid}")
@@ -509,6 +549,14 @@ class ChallView(discord.ui.View):
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if interaction.guild and not channel_allowed_for_guild(
+            interaction.channel  # type: ignore[arg-type]
+        ):
+            await interaction.response.send_message(
+                "⚠️ Use this bot only in the designated channel(s).",
+                ephemeral=True,
+            )
+            return
         if self.page > 0:
             self.page -= 1
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
@@ -517,6 +565,14 @@ class ChallView(discord.ui.View):
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if interaction.guild and not channel_allowed_for_guild(
+            interaction.channel  # type: ignore[arg-type]
+        ):
+            await interaction.response.send_message(
+                "⚠️ Use this bot only in the designated channel(s).",
+                ephemeral=True,
+            )
+            return
         if self.page < self.max_page:
             self.page += 1
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
@@ -554,6 +610,14 @@ class TeamView(discord.ui.View):
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if interaction.guild and not channel_allowed_for_guild(
+            interaction.channel  # type: ignore[arg-type]
+        ):
+            await interaction.response.send_message(
+                "⚠️ Use this bot only in the designated channel(s).",
+                ephemeral=True,
+            )
+            return
         if self.page > 0:
             self.page -= 1
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
@@ -562,6 +626,14 @@ class TeamView(discord.ui.View):
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        if interaction.guild and not channel_allowed_for_guild(
+            interaction.channel  # type: ignore[arg-type]
+        ):
+            await interaction.response.send_message(
+                "⚠️ Use this bot only in the designated channel(s).",
+                ephemeral=True,
+            )
+            return
         if self.page < self.max_page:
             self.page += 1
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
@@ -814,6 +886,8 @@ async def on_message(message):
 
 @bot.event
 async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        return
     if isinstance(error, commands.BadArgument):
         await ctx.send("⚠️ Invalid argument. Use a number (e.g. `!top 14`).")
     else:
