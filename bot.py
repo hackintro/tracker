@@ -405,23 +405,39 @@ async def check_tracking():
 
         my_rank = rank_map[my_team_id]
 
+        notified = set(entry.get("above_notified", []))
+        notified &= set(opponents)
+
         for opp_id in opponents:
             if opp_id not in rank_map:
+                notified.discard(opp_id)
                 continue
             opp_rank = rank_map[opp_id]
-            if opp_rank < my_rank:
-                opp_name = name_map.get(opp_id, str(opp_id))
-                log.info(
-                    f"Opponent {opp_name} ({opp_id}) above user {entry.get('team_name')}: #{opp_rank} vs #{my_rank}"
+            opp_name = name_map.get(opp_id, str(opp_id))
+
+            if opp_rank >= my_rank:
+                notified.discard(opp_id)
+                continue
+
+            if opp_id in notified:
+                continue
+
+            log.info(
+                f"Opponent {opp_name} ({opp_id}) above user {entry.get('team_name')}: #{opp_rank} vs #{my_rank}"
+            )
+            try:
+                user = await bot.fetch_user(int(discord_id_str))
+                await user.send(
+                    f"⚠️ **{opp_name}** is now above you! "
+                    f"(them: #{opp_rank}, you: #{my_rank})"
                 )
-                try:
-                    user = await bot.fetch_user(int(discord_id_str))
-                    await user.send(
-                        f"⚠️ **{opp_name}** is now above you! "
-                        f"(them: #{opp_rank}, you: #{my_rank})"
-                    )
-                except Exception as e:
-                    log.error(f"Failed to DM user {discord_id_str}: {e}")
+                notified.add(opp_id)
+            except Exception as e:
+                log.error(f"Failed to DM user {discord_id_str}: {e}")
+
+        entry["above_notified"] = sorted(notified)
+
+    save_track(data)
 
 
 @bot.command(name="top")
