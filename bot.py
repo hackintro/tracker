@@ -23,30 +23,13 @@ logging.basicConfig(
 log = logging.getLogger("tracker")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_IDS_RAW = (os.getenv("CHANNEL_IDS") or os.getenv("CHANNEL_ID") or "").strip()
 HC_API_URL = os.getenv("HC_API_URL")
 SITE_EMAIL = os.getenv("SITE_EMAIL", "").strip()
 SITE_PASSWORD = os.getenv("SITE_PASSWORD", "").strip()
 
-if not DISCORD_TOKEN or not HC_API_URL or not CHANNEL_IDS_RAW:
-    log.error("Missing keys in .env file!")
+if not DISCORD_TOKEN or not HC_API_URL:
+    log.error("Missing keys in .env file (need DISCORD_TOKEN and HC_API_URL).")
     exit()
-
-ALLOWED_CHANNEL_IDS = []
-for part in CHANNEL_IDS_RAW.replace(" ", "").split(","):
-    if not part:
-        continue
-    try:
-        ALLOWED_CHANNEL_IDS.append(int(part))
-    except ValueError:
-        log.error("CHANNEL_IDS must be comma-separated integers (e.g. 123,456).")
-        exit()
-
-if not ALLOWED_CHANNEL_IDS:
-    log.error("CHANNEL_IDS must list at least one channel id.")
-    exit()
-
-ALLOWED_CHANNEL_IDS = frozenset(ALLOWED_CHANNEL_IDS)
 
 TOP_PER_PAGE = 10
 
@@ -99,9 +82,12 @@ def save_chall(data):
 def load_track():
     try:
         with open(TRACK_JSON, "r") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"tracking": {}}
+        data = {"tracking": {}}
+    data.setdefault("tracking", {})
+    data.setdefault("challenge_notif_subscribers", [])
+    return data
 
 
 def save_track(data):
@@ -245,32 +231,32 @@ def resolve_competition(override_id=None):
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.dm_messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-def channel_allowed_for_guild(
-    channel: discord.abc.GuildChannel | discord.Thread | None,
-) -> bool:
-    if channel is None:
-        return False
-    if channel.id in ALLOWED_CHANNEL_IDS:
-        return True
-    if isinstance(channel, discord.Thread) and channel.parent_id is not None:
-        return channel.parent_id in ALLOWED_CHANNEL_IDS
-    return False
-
-
-async def guild_channel_check(ctx: commands.Context) -> bool:
+async def dm_only_check(ctx: commands.Context) -> bool:
     if ctx.guild is None:
         return True
-    if channel_allowed_for_guild(ctx.channel):
-        return True
-    await ctx.send("⚠️ Use this bot only in the designated channel(s).")
+    await ctx.send(
+        "⚠️ Use this bot in **DMs only** (open a direct message with the bot)."
+    )
     return False
 
 
-bot.add_check(guild_channel_check)
+bot.add_check(dm_only_check)
+
+
+async def deny_if_not_dm(interaction: discord.Interaction) -> bool:
+    """Return False and respond if interaction is not in a DM."""
+    if interaction.guild is not None:
+        await interaction.response.send_message(
+            "⚠️ Use this bot in **DMs only**.",
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 @bot.event
@@ -299,15 +285,8 @@ async def check_new_challenges():
     if CURRENT_USER_ID is None:
         return
 
-    channels = []
-    for cid in ALLOWED_CHANNEL_IDS:
-        ch = bot.get_channel(cid)
-        if ch is None:
-            log.warning(f"Channel {cid} not found (new challenge notify skipped for it)")
-        else:
-            channels.append(ch)
-    if not channels:
-        return
+    track_data = load_track()
+    subscribers = track_data.get("challenge_notif_subscribers", [])
 
     try:
         resp = HTTP.get(
@@ -361,8 +340,15 @@ async def check_new_challenges():
                     embed.description = f"**{name}** ({category})"
                 else:
                     embed.description = f"**{name}**"
-                for ch in channels:
-                    await ch.send(embed=embed)
+                if subscribers:
+                    for uid_str in subscribers:
+                        try:
+                            user = await bot.fetch_user(int(uid_str))
+                            await user.send(embed=embed)
+                        except Exception as e:
+                            log.error(
+                                f"Failed to DM new challenge to user {uid_str}: {e}"
+                            )
 
         if new_count > 0:
             log.info(f"Found {new_count} new challenge(s) in competition {cid}")
@@ -472,9 +458,7 @@ async def comps(ctx):
             await ctx.send("⚠️ No active competitions. Use `!top <id>`.")
             return
 
-        embed = discord.Embed(
-            title="Active Competitions", color=discord.Color.blue()
-        )
+        embed = discord.Embed(title="Active Competitions", color=discord.Color.blue())
         embed.description = "Use `!top <id>` to show leaderboard."
         ids = [f"`{c['competition_id']}`" for c in active]
         names = [c["name"] for c in active]
@@ -517,10 +501,14 @@ async def top(ctx, competition_id: int):
 
 
 @bot.command(name="commands")
-async def commands(ctx):
+async def commands_list(ctx):
     embed = discord.Embed(title="Commands", color=discord.Color.blue())
     embed.add_field(name="`!comps`", value="Show active competitions", inline=False)
-    embed.add_field(name="`!top <id>`", value="Top 10 leaderboard for a specific competition", inline=False)
+    embed.add_field(
+        name="`!top <id>`",
+        value="Top 10 leaderboard for a specific competition",
+        inline=False,
+    )
     embed.add_field(
         name="`!challs`", value="Challenges for current competition", inline=False
     )
@@ -534,9 +522,14 @@ async def commands(ctx):
     )
     embed.add_field(name="`!tracking`", value="Show who you're tracking", inline=False)
     embed.add_field(
-        name="`!addtrack <ids>`", value="Add opponents (DM only)", inline=False
+        name="`!addtrack <ids>`", value="Add opponent team IDs", inline=False
     )
     embed.add_field(name="`!untrack`", value="Stop tracking", inline=False)
+    embed.add_field(
+        name="`!notif`",
+        value="Toggle DM when a new challenge is released (opt-in)",
+        inline=False,
+    )
     embed.add_field(name="`!commands`", value="Show this message", inline=False)
     embed.add_field(
         name="Feedback",
@@ -587,13 +580,7 @@ class ChallView(discord.ui.View):
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if interaction.guild and not channel_allowed_for_guild(
-            interaction.channel  # type: ignore[arg-type]
-        ):
-            await interaction.response.send_message(
-                "⚠️ Use this bot only in the designated channel(s).",
-                ephemeral=True,
-            )
+        if not await deny_if_not_dm(interaction):
             return
         if self.page > 0:
             self.page -= 1
@@ -603,13 +590,7 @@ class ChallView(discord.ui.View):
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if interaction.guild and not channel_allowed_for_guild(
-            interaction.channel  # type: ignore[arg-type]
-        ):
-            await interaction.response.send_message(
-                "⚠️ Use this bot only in the designated channel(s).",
-                ephemeral=True,
-            )
+        if not await deny_if_not_dm(interaction):
             return
         if self.page < self.max_page:
             self.page += 1
@@ -648,13 +629,7 @@ class TeamView(discord.ui.View):
     async def prev_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if interaction.guild and not channel_allowed_for_guild(
-            interaction.channel  # type: ignore[arg-type]
-        ):
-            await interaction.response.send_message(
-                "⚠️ Use this bot only in the designated channel(s).",
-                ephemeral=True,
-            )
+        if not await deny_if_not_dm(interaction):
             return
         if self.page > 0:
             self.page -= 1
@@ -664,13 +639,7 @@ class TeamView(discord.ui.View):
     async def next_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        if interaction.guild and not channel_allowed_for_guild(
-            interaction.channel  # type: ignore[arg-type]
-        ):
-            await interaction.response.send_message(
-                "⚠️ Use this bot only in the designated channel(s).",
-                ephemeral=True,
-            )
+        if not await deny_if_not_dm(interaction):
             return
         if self.page < self.max_page:
             self.page += 1
@@ -719,14 +688,38 @@ async def track(ctx):
     discord_id = str(ctx.author.id)
     log.info(f"!track called by {ctx.author} ({discord_id})")
     if discord_id in conversations:
-        await ctx.send("⚠️ You already have a setup in progress. Check your DMs.")
+        await ctx.send(
+            "⚠️ You already have a setup in progress. Finish the steps in this chat."
+        )
         return
 
     dm = await ctx.author.create_dm()
     await dm.send("What is your name on the platform?")
 
     conversations[discord_id] = {"step": "name", "channel_id": ctx.channel.id}
-    await ctx.send("📬 Check your DMs to set up tracking.")
+    await ctx.send(
+        "📬 Reply here with your **platform team name** (exactly as on the site)."
+    )
+
+
+@bot.command(name="notif")
+async def notif(ctx):
+    """Opt in/out of DMs when a new challenge appears."""
+    discord_id = str(ctx.author.id)
+    log.info(f"!notif called by {ctx.author} ({discord_id})")
+    data = load_track()
+    subs = data.setdefault("challenge_notif_subscribers", [])
+    if discord_id in subs:
+        subs.remove(discord_id)
+        save_track(data)
+        await ctx.send("✅ You will no longer receive DMs for new challenges.")
+    else:
+        subs.append(discord_id)
+        save_track(data)
+        await ctx.send(
+            "✅ You will get a **DM** when a new challenge is released. "
+            "Use `!notif` again to turn this off."
+        )
 
 
 @bot.command(name="untrack")
@@ -747,10 +740,6 @@ async def untrack(ctx):
 
 @bot.command(name="addtrack")
 async def addtrack(ctx, *, ids: str = None):
-    if ctx.guild is not None:
-        await ctx.send("⚠️ Use this command in DMs.")
-        return
-
     discord_id = str(ctx.author.id)
     log.info(f"!addtrack called by {ctx.author} ({discord_id}): {ids}")
     data = load_track()
