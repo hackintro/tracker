@@ -1,4 +1,5 @@
 import discord
+from discord.utils import escape_markdown
 from discord.ext import commands, tasks
 import requests
 import os
@@ -48,6 +49,22 @@ if not ALLOWED_CHANNEL_IDS:
 ALLOWED_CHANNEL_IDS = frozenset(ALLOWED_CHANNEL_IDS)
 
 TOP_PER_PAGE = 10
+
+
+def format_leaderboard_text(teams, max_name_len=40):
+    """One line per team in embed description — layout is ours; Discord can't split into columns."""
+    header = "**Rank** — **Name** — **Score**"
+    lines = []
+    for i, t in enumerate(teams, start=1):
+        name = str(t["name"]).replace("\n", " ").strip()
+        if len(name) > max_name_len:
+            name = name[: max_name_len - 1] + "…"
+        name = escape_markdown(name)
+        score = str(t["score"])
+        lines.append(f"{i}. {name} — {score}")
+    return header + "\n" + "\n".join(lines)
+
+
 HTTP = requests.Session()
 CURRENT_USER_ID = None
 CHALL_JSON = os.path.join(os.path.dirname(__file__), "chall.json")
@@ -440,33 +457,39 @@ async def check_tracking():
     save_track(data)
 
 
-@bot.command(name="top")
-async def top(ctx, competition_id: int = None):
-    log.info(f"!top called by {ctx.author} (id={competition_id})")
+@bot.command(name="comps")
+async def comps(ctx):
+    log.info(f"!comps called by {ctx.author}")
     try:
-        if competition_id is None:
-            resp = HTTP.get(
-                f"{HC_API_URL}/users/{CURRENT_USER_ID}/competitions", timeout=15
-            )
-            resp.raise_for_status()
-            competitions = resp.json()["competitions"]
+        resp = HTTP.get(
+            f"{HC_API_URL}/users/{CURRENT_USER_ID}/competitions", timeout=15
+        )
+        resp.raise_for_status()
+        competitions = resp.json()["competitions"]
 
-            active = [c for c in competitions if is_active(c)]
-            if not active:
-                await ctx.send("⚠️ No active competitions. Use `!top <id>`.")
-                return
-
-            embed = discord.Embed(
-                title="Active Competitions", color=discord.Color.blue()
-            )
-            embed.description = "Use `!top <id>` to show leaderboard."
-            ids = [f"`{c['competition_id']}`" for c in active]
-            names = [c["name"] for c in active]
-            embed.add_field(name="ID", value="\n".join(ids), inline=True)
-            embed.add_field(name="Name", value="\n".join(names), inline=True)
-            await ctx.send(embed=embed)
+        active = [c for c in competitions if is_active(c)]
+        if not active:
+            await ctx.send("⚠️ No active competitions. Use `!top <id>`.")
             return
 
+        embed = discord.Embed(
+            title="Active Competitions", color=discord.Color.blue()
+        )
+        embed.description = "Use `!top <id>` to show leaderboard."
+        ids = [f"`{c['competition_id']}`" for c in active]
+        names = [c["name"] for c in active]
+        embed.add_field(name="ID", value="\n".join(ids), inline=True)
+        embed.add_field(name="Name", value="\n".join(names), inline=True)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        log.error(f"!comps failed: {e}")
+        await ctx.send(f"❌ Failed to fetch competitions: {e}")
+
+
+@bot.command(name="top")
+async def top(ctx, competition_id: int):
+    log.info(f"!top called by {ctx.author} (id={competition_id})")
+    try:
         comp_resp = HTTP.get(f"{HC_API_URL}/competitions/{competition_id}", timeout=15)
         comp_resp.raise_for_status()
         comp_name = comp_resp.json()["name"]
@@ -483,16 +506,10 @@ async def top(ctx, competition_id: int = None):
             return
 
         embed = discord.Embed(
-            title=f"Top {TOP_PER_PAGE} — {comp_name}", color=discord.Color.gold()
+            title=f"Top {TOP_PER_PAGE} — {comp_name}",
+            description=format_leaderboard_text(teams),
+            color=discord.Color.gold(),
         )
-
-        pos = [str(r) for r in range(1, len(teams) + 1)]
-        names = [t["name"] for t in teams]
-        scores = [str(t["score"]) for t in teams]
-
-        embed.add_field(name="Pos", value="\n".join(pos), inline=True)
-        embed.add_field(name="Name", value="\n".join(names), inline=True)
-        embed.add_field(name="Score", value="\n".join(scores), inline=True)
         await ctx.send(embed=embed)
     except Exception as e:
         log.error(f"!top failed: {e}")
@@ -502,8 +519,8 @@ async def top(ctx, competition_id: int = None):
 @bot.command(name="commands")
 async def commands(ctx):
     embed = discord.Embed(title="Commands", color=discord.Color.blue())
-    embed.add_field(name="`!top`", value="Show active competitions", inline=False)
-    embed.add_field(name="`!top <id>`", value="Top 10 leaderboard", inline=False)
+    embed.add_field(name="`!comps`", value="Show active competitions", inline=False)
+    embed.add_field(name="`!top <id>`", value="Top 10 leaderboard for a specific competition", inline=False)
     embed.add_field(
         name="`!challs`", value="Challenges for current competition", inline=False
     )
@@ -521,6 +538,11 @@ async def commands(ctx):
     )
     embed.add_field(name="`!untrack`", value="Stop tracking", inline=False)
     embed.add_field(name="`!commands`", value="Show this message", inline=False)
+    embed.add_field(
+        name="Feedback",
+        value="For feature requests or bug reports, please [open an issue](https://github.com/hackintro/tracker/issues).",
+        inline=False,
+    )
     await ctx.send(embed=embed)
 
 
@@ -904,6 +926,13 @@ async def on_message(message):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         return
+    if isinstance(error, commands.MissingRequiredArgument):
+        if ctx.command and ctx.command.name == "top":
+            await ctx.send(
+                "⚠️ Specify a competition ID (e.g. `!top 14`). "
+                "Use `!comps` to list active competitions."
+            )
+            return
     if isinstance(error, commands.BadArgument):
         await ctx.send("⚠️ Invalid argument. Use a number (e.g. `!top 14`).")
     else:
